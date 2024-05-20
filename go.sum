@@ -71,6 +71,10 @@ github.com/VictoriaMetrics/fastcache v1.12.2 h1:N0y9ASrJ0F6h0QaC3o6uJb3NIZ9VKLjC
 github.com/VictoriaMetrics/fastcache v1.12.2/go.mod h1:AmC+Nzz1+3G2eCPapF6UcsnkThDcMsQicp4xDukwJYI=
 github.com/VictoriaMetrics/metrics v1.33.1 h1:CNV3tfm2Kpv7Y9W3ohmvqgFWPR55tV2c7M2U6OIo+UM=
 github.com/VictoriaMetrics/metrics v1.33.1/go.mod h1:r7hveu6xMdUACXvB8TYdAj8WEsKzWB0EkpJN+RDtOf8=
+github.com/VictoriaMetrics/metrics v1.33.2-0.20240520105253-a52bdc6f1527 h1:yYhaAn0nZYbDKxXMXzGbKFp7GwnsCR0nppsU8TcOadc=
+github.com/VictoriaMetrics/metrics v1.33.2-0.20240520105253-a52bdc6f1527/go.mod h1:r7hveu6xMdUACXvB8TYdAj8WEsKzWB0EkpJN+RDtOf8=
+github.com/VictoriaMetrics/metrics v1.33.2-0.20240520124652-5e5f209f79e7 h1:LZBx6EQF3qUd+zdGjaKRk5LKm8OVW2AZZ7rlu+YU4uE=
+github.com/VictoriaMetrics/metrics v1.33.2-0.20240520124652-5e5f209f79e7/go.mod h1:r7hveu6xMdUACXvB8TYdAj8WEsKzWB0EkpJN+RDtOf8=
 github.com/VictoriaMetrics/metricsql v0.75.1 h1:cE5Ex6qSdI9vVT2BnsO6GpepB/8LPoSPKQmrM+fuQ84=
 github.com/VictoriaMetrics/metricsql v0.75.1/go.mod h1:bEC8gqV+7kjnp97a8Gd6JbV1TraeZhfhvYAuaDuNR/U=
 github.com/VividCortex/ewma v1.2.0 h1:f58SaIzcDXrSy3kWaHNvuJgJ3Nmz59Zji6XoJR/q1ow=

@@ -18,16 +18,17 @@ func BenchmarkDedupAggr(b *testing.B) {
 }
 
 func BenchmarkDedupAggrFlushSerial(b *testing.B) {
-	as := newTotalAggrState(time.Hour, true, true)
+	as := newTotalAggrState(true, true)
 	benchSamples := newBenchSamples(100_000)
 	da := newDedupAggr()
-	da.pushSamples(benchSamples)
+	da.pushSamples(benchSamples, 0)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	b.SetBytes(int64(len(benchSamples)))
+	flushTimestamp := time.Now().UnixMilli()
 	for i := 0; i < b.N; i++ {
-		da.flush(as.pushSamples, false)
+		da.flush(as.pushSamples, flushTimestamp, 0, 0)
 	}
 }
 
@@ -42,7 +43,7 @@ func benchmarkDedupAggr(b *testing.B, samplesPerPush int) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			for i := 0; i < loops; i++ {
-				da.pushSamples(benchSamples)
+				da.pushSamples(benchSamples, 0)
 			}
 		}
 	})

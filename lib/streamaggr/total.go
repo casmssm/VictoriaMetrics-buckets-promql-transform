@@ -3,9 +3,6 @@ package streamaggr
 import (
 	"math"
 	"sync"
-	"time"
-
-	"github.com/VictoriaMetrics/VictoriaMetrics/lib/fasttime"
 )
 
 // totalAggrState calculates output=total, e.g. the summary counter over input counters.
@@ -19,36 +16,28 @@ type totalAggrState struct {
 
 	// Whether to take into account the first sample in new time series when calculating the output value.
 	keepFirstSample bool
-
-	// Time series state is dropped if no new samples are received during stalenessSecs.
-	//
-	// Aslo, the first sample per each new series is ignored during stalenessSecs even if keepFirstSample is set.
-	// see ignoreFirstSampleDeadline for more details.
-	stalenessSecs uint64
-
-	// The first sample per each new series is ignored until this unix timestamp deadline in seconds even if keepFirstSample is set.
-	// This allows avoiding an initial spike of the output values at startup when new time series
-	// cannot be distinguished from already existing series. This is tracked with ignoreFirstSampleDeadline.
-	ignoreFirstSampleDeadline uint64
 }
 
 type totalStateValue struct {
 	mu             sync.Mutex
-	lastValues     map[string]totalLastValueState
-	total          float64
-	deleteDeadline uint64
+	shared         totalState
+	state          [aggrStateSize]float64
+	deleteDeadline int64
 	deleted        bool
+}
+
+type totalState struct {
+	total      float64
+	lastValues map[string]totalLastValueState
 }
 
 type totalLastValueState struct {
 	value          float64
 	timestamp      int64
-	deleteDeadline uint64
+	deleteDeadline int64
 }
 
-func newTotalAggrState(stalenessInterval time.Duration, resetTotalOnFlush, keepFirstSample bool) *totalAggrState {
-	stalenessSecs := roundDurationToSecs(stalenessInterval)
-	ignoreFirstSampleDeadline := fasttime.UnixTimestamp() + stalenessSecs
+func newTotalAggrState(resetTotalOnFlush, keepFirstSample bool) *totalAggrState {
 	suffix := "total"
 	if resetTotalOnFlush {
 		suffix = "increase"
@@ -57,18 +46,14 @@ func newTotalAggrState(stalenessInterval time.Duration, resetTotalOnFlush, keepF
 		suffix += "_prometheus"
 	}
 	return &totalAggrState{
-		suffix:                    suffix,
-		resetTotalOnFlush:         resetTotalOnFlush,
-		keepFirstSample:           keepFirstSample,
-		stalenessSecs:             stalenessSecs,
-		ignoreFirstSampleDeadline: ignoreFirstSampleDeadline,
+		suffix:            suffix,
+		resetTotalOnFlush: resetTotalOnFlush,
+		keepFirstSample:   keepFirstSample,
 	}
 }
 
-func (as *totalAggrState) pushSamples(samples []pushSample) {
-	currentTime := fasttime.UnixTimestamp()
-	deleteDeadline := currentTime + as.stalenessSecs
-	keepFirstSample := as.keepFirstSample && currentTime > as.ignoreFirstSampleDeadline
+func (as *totalAggrState) pushSamples(samples []pushSample, deleteDeadline int64, idx int) {
+	var deleted bool
 	for i := range samples {
 		s := &samples[i]
 		inputKey, outputKey := getInputOutputKey(s.key)
@@ -78,7 +63,9 @@ func (as *totalAggrState) pushSamples(samples []pushSample) {
 		if !ok {
 			// The entry is missing in the map. Try creating it.
 			v = &totalStateValue{
-				lastValues: make(map[string]totalLastValueState),
+				shared: totalState{
+					lastValues: make(map[string]totalLastValueState),
+				},
 			}
 			vNew, loaded := as.m.LoadOrStore(outputKey, v)
 			if loaded {
@@ -88,10 +75,10 @@ func (as *totalAggrState) pushSamples(samples []pushSample) {
 		}
 		sv := v.(*totalStateValue)
 		sv.mu.Lock()
-		deleted := sv.deleted
+		deleted = sv.deleted
 		if !deleted {
-			lv, ok := sv.lastValues[inputKey]
-			if ok || keepFirstSample {
+			lv, ok := sv.shared.lastValues[inputKey]
+			if ok || as.keepFirstSample {
 				if s.timestamp < lv.timestamp {
 					// Skip out of order sample
 					sv.mu.Unlock()
@@ -99,16 +86,16 @@ func (as *totalAggrState) pushSamples(samples []pushSample) {
 				}
 
 				if s.value >= lv.value {
-					sv.total += s.value - lv.value
+					sv.state[idx] += s.value - lv.value
 				} else {
 					// counter reset
-					sv.total += s.value
+					sv.state[idx] += s.value
 				}
 			}
 			lv.value = s.value
 			lv.timestamp = s.timestamp
 			lv.deleteDeadline = deleteDeadline
-			sv.lastValues[inputKey] = lv
+			sv.shared.lastValues[inputKey] = lv
 			sv.deleteDeadline = deleteDeadline
 		}
 		sv.mu.Unlock()
@@ -120,59 +107,40 @@ func (as *totalAggrState) pushSamples(samples []pushSample) {
 	}
 }
 
-func (as *totalAggrState) removeOldEntries(currentTime uint64) {
+func (as *totalAggrState) flushState(ctx *flushCtx, flushTimestamp int64, idx int) {
+	var total float64
 	m := &as.m
 	m.Range(func(k, v interface{}) bool {
 		sv := v.(*totalStateValue)
 
 		sv.mu.Lock()
-		deleted := currentTime > sv.deleteDeadline
+		// check for stale entries
+		deleted := flushTimestamp > sv.deleteDeadline
 		if deleted {
 			// Mark the current entry as deleted
 			sv.deleted = deleted
-		} else {
-			// Delete outdated entries in sv.lastValues
-			m := sv.lastValues
-			for k1, v1 := range m {
-				if currentTime > v1.deleteDeadline {
-					delete(m, k1)
-				}
-			}
-		}
-		sv.mu.Unlock()
-
-		if deleted {
+			sv.mu.Unlock()
 			m.Delete(k)
+			return true
 		}
-		return true
-	})
-}
-
-func (as *totalAggrState) flushState(ctx *flushCtx, resetState bool) {
-	currentTime := fasttime.UnixTimestamp()
-	currentTimeMsec := int64(currentTime) * 1000
-
-	as.removeOldEntries(currentTime)
-
-	m := &as.m
-	m.Range(func(k, v interface{}) bool {
-		sv := v.(*totalStateValue)
-		sv.mu.Lock()
-		total := sv.total
-		if resetState {
-			if as.resetTotalOnFlush {
-				sv.total = 0
-			} else if math.Abs(sv.total) >= (1 << 53) {
-				// It is time to reset the entry, since it starts losing float64 precision
-				sv.total = 0
+		total = sv.shared.total + sv.state[idx]
+		for k1, v1 := range sv.shared.lastValues {
+			if flushTimestamp > v1.deleteDeadline {
+				delete(sv.shared.lastValues, k1)
 			}
 		}
-		deleted := sv.deleted
-		sv.mu.Unlock()
-		if !deleted {
-			key := k.(string)
-			ctx.appendSeries(key, as.suffix, currentTimeMsec, total)
+		sv.state[idx] = 0
+		if !as.resetTotalOnFlush {
+			if math.Abs(total) >= (1 << 53) {
+				// It is time to reset the entry, since it starts losing float64 precision
+				sv.shared.total = 0
+			} else {
+				sv.shared.total = total
+			}
 		}
+		sv.mu.Unlock()
+		key := k.(string)
+		ctx.appendSeries(key, as.suffix, flushTimestamp, total)
 		return true
 	})
 }
