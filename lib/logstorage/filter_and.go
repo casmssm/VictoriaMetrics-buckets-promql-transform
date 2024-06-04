@@ -114,57 +114,55 @@ func (fa *filterAnd) getByFieldTokens() []fieldTokens {
 
 func (fa *filterAnd) initByFieldTokens() {
 	m := make(map[string]map[string]struct{})
-	byFieldFilters := make(map[string]int)
 	var fieldNames []string
 
-	for _, f := range fa.filters {
-		fieldName := ""
-		var tokens []string
-
-		switch t := f.(type) {
-		case *filterExact:
-			fieldName = t.fieldName
-			tokens = t.getTokens()
-		case *filterExactPrefix:
-			fieldName = t.fieldName
-			tokens = t.getTokens()
-		case *filterPhrase:
-			fieldName = t.fieldName
-			tokens = t.getTokens()
-		case *filterPrefix:
-			fieldName = t.fieldName
-			tokens = t.getTokens()
-		case *filterRegexp:
-			fieldName = t.fieldName
-			tokens = t.getTokens()
-		case *filterSequence:
-			fieldName = t.fieldName
-			tokens = t.getTokens()
+	mergeFieldTokens := func(fieldName string, tokens []string) {
+		if len(tokens) == 0 {
+			return
 		}
 
 		fieldName = getCanonicalColumnName(fieldName)
-		byFieldFilters[fieldName]++
+		mTokens, ok := m[fieldName]
+		if !ok {
+			fieldNames = append(fieldNames, fieldName)
+			mTokens = make(map[string]struct{})
+			m[fieldName] = mTokens
+		}
+		for _, token := range tokens {
+			mTokens[token] = struct{}{}
+		}
+	}
 
-		if len(tokens) > 0 {
-			mTokens, ok := m[fieldName]
-			if !ok {
-				fieldNames = append(fieldNames, fieldName)
-				mTokens = make(map[string]struct{})
-				m[fieldName] = mTokens
-			}
-			for _, token := range tokens {
-				mTokens[token] = struct{}{}
+	for _, f := range fa.filters {
+		switch t := f.(type) {
+		case *filterExact:
+			tokens := t.getTokens()
+			mergeFieldTokens(t.fieldName, tokens)
+		case *filterExactPrefix:
+			tokens := t.getTokens()
+			mergeFieldTokens(t.fieldName, tokens)
+		case *filterPhrase:
+			tokens := t.getTokens()
+			mergeFieldTokens(t.fieldName, tokens)
+		case *filterPrefix:
+			tokens := t.getTokens()
+			mergeFieldTokens(t.fieldName, tokens)
+		case *filterRegexp:
+			tokens := t.getTokens()
+			mergeFieldTokens(t.fieldName, tokens)
+		case *filterSequence:
+			tokens := t.getTokens()
+			mergeFieldTokens(t.fieldName, tokens)
+		case *filterOr:
+			bfts := t.getByFieldTokens()
+			for _, bft := range bfts {
+				mergeFieldTokens(bft.field, bft.tokens)
 			}
 		}
 	}
 
 	var byFieldTokens []fieldTokens
 	for _, fieldName := range fieldNames {
-		if byFieldFilters[fieldName] < 2 {
-			// It is faster to perform bloom filter match inline when visiting the corresponding column
-			continue
-		}
-
 		mTokens := m[fieldName]
 		tokens := make([]string, 0, len(mTokens))
 		for token := range mTokens {
