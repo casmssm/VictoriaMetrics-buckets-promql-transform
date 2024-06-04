@@ -649,6 +649,12 @@ func newAggregator(cfg *Config, pushFunc PushFunc, ms *metrics.Set, opts *Option
 		skipIncompleteFlush = !*v
 	}
 
+	minTime := time.Now()
+	if skipIncompleteFlush && alignFlushToInterval {
+		minTime = minTime.Truncate(interval).Add(interval)
+	}
+	a.minTimestamp.Store(minTime.UnixMilli())
+
 	a.wg.Add(1)
 	go func() {
 		a.runFlusher(pushFunc, alignFlushToInterval, skipIncompleteFlush, interval, dedupInterval, ignoreFirstIntervals)
@@ -793,11 +799,6 @@ func (a *aggregator) dedupFlush(dedupInterval time.Duration, deleteDeadline int6
 func (a *aggregator) flush(pushFunc PushFunc, interval time.Duration, flushTimestamp int64, idx int) {
 	startTime := time.Now()
 
-	// Update minTimestamp before flushing samples to the storage,
-	// since the flush durtion can be quite long.
-	// This should prevent from dropping samples with old timestamps when the flush takes long time.
-	a.minTimestamp.Store(startTime.UnixMilli() - 5_000)
-
 	var wg sync.WaitGroup
 	for _, as := range a.aggrStates {
 		flushConcurrencyCh <- struct{}{}
@@ -819,6 +820,7 @@ func (a *aggregator) flush(pushFunc PushFunc, interval time.Duration, flushTimes
 
 	d := time.Since(startTime)
 	a.flushDuration.Update(d.Seconds())
+	a.minTimestamp.Store(flushTimestamp)
 	if d > interval {
 		a.flushTimeouts.Inc()
 		logger.Warnf("stream aggregation couldn't be finished in the configured interval=%s; it took %.03fs; "+
@@ -854,8 +856,8 @@ func (a *aggregator) Push(tss []prompbmarshal.TimeSeries, matchIdxs []byte) {
 
 	dropLabels := a.dropInputLabels
 	ignoreOldSamples := a.ignoreOldSamples
-	var flushIdx int
 	minTimestamp := a.minTimestamp.Load()
+	var flushIdx int
 	for idx, ts := range tss {
 		if !a.match.Match(ts.Labels) {
 			continue
@@ -899,7 +901,7 @@ func (a *aggregator) Push(tss []prompbmarshal.TimeSeries, matchIdxs []byte) {
 				continue
 			}
 			if ignoreOldSamples {
-				flushIdx = int(sample.Timestamp/a.tickInterval+1) % aggrStateSize
+				flushIdx = int((sample.Timestamp)/a.tickInterval+1) % aggrStateSize
 			}
 			samples[flushIdx] = append(samples[flushIdx], pushSample{
 				key:       key,
