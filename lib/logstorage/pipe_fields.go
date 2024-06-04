@@ -29,6 +29,7 @@ func (pf *pipeFields) updateNeededFields(neededFields, unneededFields fieldsSet)
 	if pf.containsStar {
 		return
 	}
+
 	if neededFields.contains("*") {
 		// subtract unneeded fields from pf.fields
 		neededFields.reset()
@@ -49,16 +50,28 @@ func (pf *pipeFields) updateNeededFields(neededFields, unneededFields fieldsSet)
 	unneededFields.reset()
 }
 
-func (pf *pipeFields) newPipeProcessor(_ int, _ <-chan struct{}, _ func(), ppBase pipeProcessor) pipeProcessor {
+func (pf *pipeFields) optimize() {
+	// nothing to do
+}
+
+func (pf *pipeFields) hasFilterInWithQuery() bool {
+	return false
+}
+
+func (pf *pipeFields) initFilterInValues(_ map[string][]string, _ getFieldValuesFunc) (pipe, error) {
+	return pf, nil
+}
+
+func (pf *pipeFields) newPipeProcessor(_ int, _ <-chan struct{}, _ func(), ppNext pipeProcessor) pipeProcessor {
 	return &pipeFieldsProcessor{
 		pf:     pf,
-		ppBase: ppBase,
+		ppNext: ppNext,
 	}
 }
 
 type pipeFieldsProcessor struct {
 	pf     *pipeFields
-	ppBase pipeProcessor
+	ppNext pipeProcessor
 }
 
 func (pfp *pipeFieldsProcessor) writeBlock(workerID uint, br *blockResult) {
@@ -69,7 +82,7 @@ func (pfp *pipeFieldsProcessor) writeBlock(workerID uint, br *blockResult) {
 	if !pfp.pf.containsStar {
 		br.setColumns(pfp.pf.fields)
 	}
-	pfp.ppBase.writeBlock(workerID, br)
+	pfp.ppNext.writeBlock(workerID, br)
 }
 
 func (pfp *pipeFieldsProcessor) flush() error {

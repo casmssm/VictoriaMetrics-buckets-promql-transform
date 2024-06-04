@@ -3,7 +3,9 @@ package logstorage
 import (
 	"context"
 	"fmt"
-	"regexp"
+	"reflect"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -310,6 +312,314 @@ func TestStorageRunQuery(t *testing.T) {
 		tenantIDs := []TenantID{tenantID}
 		mustRunQuery(tenantIDs, q, writeBlock)
 	})
+	t.Run("field_names-all", func(t *testing.T) {
+		q := mustParseQuery("*")
+		names, err := s.GetFieldNames(context.Background(), allTenantIDs, q)
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+
+		resultExpected := []ValueWithHits{
+			{"_msg", 1155},
+			{"_stream", 1155},
+			{"_time", 1155},
+			{"instance", 1155},
+			{"job", 1155},
+			{"source-file", 1155},
+			{"stream-id", 1155},
+			{"tenant.id", 1155},
+		}
+		if !reflect.DeepEqual(names, resultExpected) {
+			t.Fatalf("unexpected result; got\n%v\nwant\n%v", names, resultExpected)
+		}
+	})
+	t.Run("field_names-some", func(t *testing.T) {
+		q := mustParseQuery(`_stream:{instance=~"host-1:.+"}`)
+		names, err := s.GetFieldNames(context.Background(), allTenantIDs, q)
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+
+		resultExpected := []ValueWithHits{
+			{"_msg", 385},
+			{"_stream", 385},
+			{"_time", 385},
+			{"instance", 385},
+			{"job", 385},
+			{"source-file", 385},
+			{"stream-id", 385},
+			{"tenant.id", 385},
+		}
+		if !reflect.DeepEqual(names, resultExpected) {
+			t.Fatalf("unexpected result; got\n%v\nwant\n%v", names, resultExpected)
+		}
+	})
+	t.Run("field_values-nolimit", func(t *testing.T) {
+		q := mustParseQuery("*")
+		values, err := s.GetFieldValues(context.Background(), allTenantIDs, q, "_stream", 0)
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+
+		resultExpected := []ValueWithHits{
+			{`{instance="host-0:234",job="foobar"}`, 385},
+			{`{instance="host-1:234",job="foobar"}`, 385},
+			{`{instance="host-2:234",job="foobar"}`, 385},
+		}
+		if !reflect.DeepEqual(values, resultExpected) {
+			t.Fatalf("unexpected result; got\n%v\nwant\n%v", values, resultExpected)
+		}
+	})
+	t.Run("field_values-limit", func(t *testing.T) {
+		q := mustParseQuery("*")
+		values, err := s.GetFieldValues(context.Background(), allTenantIDs, q, "_stream", 3)
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+
+		resultExpected := []ValueWithHits{
+			{`{instance="host-0:234",job="foobar"}`, 0},
+			{`{instance="host-1:234",job="foobar"}`, 0},
+			{`{instance="host-2:234",job="foobar"}`, 0},
+		}
+		if !reflect.DeepEqual(values, resultExpected) {
+			t.Fatalf("unexpected result; got\n%v\nwant\n%v", values, resultExpected)
+		}
+	})
+	t.Run("field_values-limit", func(t *testing.T) {
+		q := mustParseQuery("instance:='host-1:234'")
+		values, err := s.GetFieldValues(context.Background(), allTenantIDs, q, "_stream", 4)
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+
+		resultExpected := []ValueWithHits{
+			{`{instance="host-1:234",job="foobar"}`, 385},
+		}
+		if !reflect.DeepEqual(values, resultExpected) {
+			t.Fatalf("unexpected result; got\n%v\nwant\n%v", values, resultExpected)
+		}
+	})
+	t.Run("stream_field_names", func(t *testing.T) {
+		q := mustParseQuery("*")
+		names, err := s.GetStreamFieldNames(context.Background(), allTenantIDs, q)
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+
+		resultExpected := []ValueWithHits{
+			{"instance", 1155},
+			{"job", 1155},
+		}
+		if !reflect.DeepEqual(names, resultExpected) {
+			t.Fatalf("unexpected result; got\n%v\nwant\n%v", names, resultExpected)
+		}
+	})
+	t.Run("stream_field_values-nolimit", func(t *testing.T) {
+		q := mustParseQuery("*")
+		values, err := s.GetStreamFieldValues(context.Background(), allTenantIDs, q, "instance", 0)
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+
+		resultExpected := []ValueWithHits{
+			{`host-0:234`, 385},
+			{`host-1:234`, 385},
+			{`host-2:234`, 385},
+		}
+		if !reflect.DeepEqual(values, resultExpected) {
+			t.Fatalf("unexpected result; got\n%v\nwant\n%v", values, resultExpected)
+		}
+	})
+	t.Run("stream_field_values-limit", func(t *testing.T) {
+		q := mustParseQuery("*")
+		values, err := s.GetStreamFieldValues(context.Background(), allTenantIDs, q, "instance", 3)
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+
+		resultExpected := []ValueWithHits{
+			{`host-0:234`, 385},
+			{`host-1:234`, 385},
+			{`host-2:234`, 385},
+		}
+		if !reflect.DeepEqual(values, resultExpected) {
+			t.Fatalf("unexpected result; got\n%v\nwant\n%v", values, resultExpected)
+		}
+	})
+	t.Run("streams", func(t *testing.T) {
+		q := mustParseQuery("*")
+		names, err := s.GetStreams(context.Background(), allTenantIDs, q, 0)
+		if err != nil {
+			t.Fatalf("unexpected error: %s", err)
+		}
+
+		resultExpected := []ValueWithHits{
+			{`{instance="host-0:234",job="foobar"}`, 385},
+			{`{instance="host-1:234",job="foobar"}`, 385},
+			{`{instance="host-2:234",job="foobar"}`, 385},
+		}
+		if !reflect.DeepEqual(names, resultExpected) {
+			t.Fatalf("unexpected result; got\n%v\nwant\n%v", names, resultExpected)
+		}
+	})
+
+	// Run more complex tests
+	f := func(t *testing.T, query string, rowsExpected [][]Field) {
+		t.Helper()
+
+		q := mustParseQuery(query)
+		var resultRowsLock sync.Mutex
+		var resultRows [][]Field
+		writeBlock := func(_ uint, _ []int64, bcs []BlockColumn) {
+			if len(bcs) == 0 {
+				return
+			}
+
+			for i := 0; i < len(bcs[0].Values); i++ {
+				row := make([]Field, len(bcs))
+				for j, bc := range bcs {
+					row[j] = Field{
+						Name:  strings.Clone(bc.Name),
+						Value: strings.Clone(bc.Values[i]),
+					}
+				}
+				resultRowsLock.Lock()
+				resultRows = append(resultRows, row)
+				resultRowsLock.Unlock()
+			}
+		}
+		mustRunQuery(allTenantIDs, q, writeBlock)
+
+		assertRowsEqual(t, resultRows, rowsExpected)
+	}
+
+	t.Run("stats-count-total", func(t *testing.T) {
+		f(t, `* | stats count() rows`, [][]Field{
+			{
+				{"rows", "1155"},
+			},
+		})
+	})
+	t.Run("in-filter-with-subquery-match", func(t *testing.T) {
+		f(t, `tenant.id:in(tenant.id:2 | fields tenant.id) | stats count() rows`, [][]Field{
+			{
+				{"rows", "105"},
+			},
+		})
+	})
+	t.Run("in-filter-with-subquery-mismatch", func(t *testing.T) {
+		f(t, `tenant.id:in(tenant.id:23243 | fields tenant.id) | stats count() rows`, [][]Field{
+			{
+				{"rows", "0"},
+			},
+		})
+	})
+	t.Run("conditional-stats", func(t *testing.T) {
+		f(t, `* | stats
+			count() rows_total,
+			count() if (stream-id:0) stream_0_rows,
+			count() if (stream-id:1123) stream_x_rows
+		`, [][]Field{
+			{
+				{"rows_total", "1155"},
+				{"stream_0_rows", "385"},
+				{"stream_x_rows", "0"},
+			},
+		})
+	})
+	t.Run("in-filter-with-subquery-in-conditional-stats-mismatch", func(t *testing.T) {
+		f(t, `* | stats
+			count() rows_total,
+			count() if (tenant.id:in(tenant.id:3 | fields tenant.id)) rows_nonzero,
+			count() if (tenant.id:in(tenant.id:23243 | fields tenant.id)) rows_zero
+		`, [][]Field{
+			{
+				{"rows_total", "1155"},
+				{"rows_nonzero", "105"},
+				{"rows_zero", "0"},
+			},
+		})
+	})
+	t.Run("pipe-extract", func(*testing.T) {
+		f(t, `* | extract "host-<host>:" from instance | uniq (host) with hits | sort by (host)`, [][]Field{
+			{
+				{"host", "0"},
+				{"hits", "385"},
+			},
+			{
+				{"host", "1"},
+				{"hits", "385"},
+			},
+			{
+				{"host", "2"},
+				{"hits", "385"},
+			},
+		})
+	})
+	t.Run("pipe-extract-if-filter-with-subquery", func(*testing.T) {
+		f(t, `* | extract
+				if (tenant.id:in(tenant.id:(3 or 4) | fields tenant.id))
+				"host-<host>:" from instance
+			| filter host:~"1|2"
+			| uniq (tenant.id, host) with hits
+			| sort by (tenant.id, host)`, [][]Field{
+			{
+				{"tenant.id", "{accountID=3,projectID=31}"},
+				{"host", "1"},
+				{"hits", "35"},
+			},
+			{
+				{"tenant.id", "{accountID=3,projectID=31}"},
+				{"host", "2"},
+				{"hits", "35"},
+			},
+			{
+				{"tenant.id", "{accountID=4,projectID=41}"},
+				{"host", "1"},
+				{"hits", "35"},
+			},
+			{
+				{"tenant.id", "{accountID=4,projectID=41}"},
+				{"host", "2"},
+				{"hits", "35"},
+			},
+		})
+	})
+	t.Run("pipe-extract-if-filter-with-subquery-non-empty-host", func(*testing.T) {
+		f(t, `* | extract
+				if (tenant.id:in(tenant.id:3 | fields tenant.id))
+				"host-<host>:" from instance
+			| filter host:*
+			| uniq (host) with hits
+			| sort by (host)`, [][]Field{
+			{
+				{"host", "0"},
+				{"hits", "35"},
+			},
+			{
+				{"host", "1"},
+				{"hits", "35"},
+			},
+			{
+				{"host", "2"},
+				{"hits", "35"},
+			},
+		})
+	})
+	t.Run("pipe-extract-if-filter-with-subquery-empty-host", func(*testing.T) {
+		f(t, `* | extract
+				if (tenant.id:in(tenant.id:3 | fields tenant.id))
+				"host-<host>:" from instance
+			| filter host:""
+			| uniq (host) with hits
+			| sort by (host)`, [][]Field{
+			{
+				{"host", ""},
+				{"hits", "1050"},
+			},
+		})
+	})
 
 	// Close the storage and delete its data
 	s.MustClose()
@@ -319,7 +629,7 @@ func TestStorageRunQuery(t *testing.T) {
 func mustParseQuery(query string) *Query {
 	q, err := ParseQuery(query)
 	if err != nil {
-		panic(fmt.Errorf("BUG: cannot parse %s: %w", query, err))
+		panic(fmt.Errorf("BUG: cannot parse [%s]: %w", query, err))
 	}
 	return q
 }
@@ -582,7 +892,7 @@ func TestStorageSearch(t *testing.T) {
 				f,
 				&filterRegexp{
 					fieldName: "_msg",
-					re:        regexp.MustCompile("message [02] at "),
+					re:        mustCompileRegex("message [02] at "),
 				},
 			},
 		}
@@ -651,15 +961,15 @@ func TestStorageSearch(t *testing.T) {
 	fs.MustRemoveAll(path)
 }
 
-func TestParseStreamLabelsSuccess(t *testing.T) {
+func TestParseStreamFieldsSuccess(t *testing.T) {
 	f := func(s, resultExpected string) {
 		t.Helper()
 
-		labels, err := parseStreamLabels(nil, s)
+		labels, err := parseStreamFields(nil, s)
 		if err != nil {
 			t.Fatalf("unexpected error: %s", err)
 		}
-		result := marshalFieldsToJSON(nil, labels)
+		result := MarshalFieldsToJSON(nil, labels)
 		if string(result) != resultExpected {
 			t.Fatalf("unexpected result\ngot\n%s\nwant\n%s", result, resultExpected)
 		}

@@ -77,7 +77,7 @@ func ProcessHitsRequest(ctx context.Context, w http.ResponseWriter, r *http.Requ
 			hitsStr := strings.Clone(hitsValues[i])
 
 			bb.Reset()
-			WriteLabelsForHits(bb, columns, i)
+			WriteFieldsForHits(bb, columns, i)
 
 			mLock.Lock()
 			hs, ok := m[string(bb.B)]
@@ -146,7 +146,7 @@ func ProcessFieldNamesRequest(ctx context.Context, w http.ResponseWriter, r *htt
 
 	// Write results
 	w.Header().Set("Content-Type", "application/json")
-	WriteFieldNamesResponse(w, fieldNames)
+	WriteValuesWithHitsJSON(w, fieldNames)
 }
 
 // ProcessFieldValuesRequest handles /select/logsql/field_values request.
@@ -186,45 +186,45 @@ func ProcessFieldValuesRequest(ctx context.Context, w http.ResponseWriter, r *ht
 
 	// Write results
 	w.Header().Set("Content-Type", "application/json")
-	WriteFieldValuesResponse(w, values)
+	WriteValuesWithHitsJSON(w, values)
 }
 
-// ProcessStreamLabelNamesRequest processes /select/logsql/stream_label_names request.
+// ProcessStreamFieldNamesRequest processes /select/logsql/stream_field_names request.
 //
-// See https://docs.victoriametrics.com/victorialogs/querying/#querying-stream-label-names
-func ProcessStreamLabelNamesRequest(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+// See https://docs.victoriametrics.com/victorialogs/querying/#querying-stream-field-names
+func ProcessStreamFieldNamesRequest(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	q, tenantIDs, err := parseCommonArgs(r)
 	if err != nil {
 		httpserver.Errorf(w, r, "%s", err)
 		return
 	}
 
-	// Obtain stream label names for the given query
+	// Obtain stream field names for the given query
 	q.Optimize()
-	names, err := vlstorage.GetStreamLabelNames(ctx, tenantIDs, q)
+	names, err := vlstorage.GetStreamFieldNames(ctx, tenantIDs, q)
 	if err != nil {
-		httpserver.Errorf(w, r, "cannot obtain stream label names: %s", err)
+		httpserver.Errorf(w, r, "cannot obtain stream field names: %s", err)
 	}
 
 	// Write results
 	w.Header().Set("Content-Type", "application/json")
-	WriteStreamLabelNamesResponse(w, names)
+	WriteValuesWithHitsJSON(w, names)
 }
 
-// ProcessStreamLabelValuesRequest processes /select/logsql/stream_label_values request.
+// ProcessStreamFieldValuesRequest processes /select/logsql/stream_field_values request.
 //
-// See https://docs.victoriametrics.com/victorialogs/querying/#querying-stream-label-values
-func ProcessStreamLabelValuesRequest(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+// See https://docs.victoriametrics.com/victorialogs/querying/#querying-stream-field-values
+func ProcessStreamFieldValuesRequest(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	q, tenantIDs, err := parseCommonArgs(r)
 	if err != nil {
 		httpserver.Errorf(w, r, "%s", err)
 		return
 	}
 
-	// Parse labelName query arg
-	labelName := r.FormValue("label")
-	if labelName == "" {
-		httpserver.Errorf(w, r, "missing 'label' query arg")
+	// Parse fieldName query arg
+	fieldName := r.FormValue("field")
+	if fieldName == "" {
+		httpserver.Errorf(w, r, "missing 'field' query arg")
 		return
 	}
 
@@ -238,16 +238,16 @@ func ProcessStreamLabelValuesRequest(ctx context.Context, w http.ResponseWriter,
 		limit = 0
 	}
 
-	// Obtain stream label names for the given query
+	// Obtain stream field values for the given query and the given fieldName
 	q.Optimize()
-	values, err := vlstorage.GetStreamLabelValues(ctx, tenantIDs, q, labelName, uint64(limit))
+	values, err := vlstorage.GetStreamFieldValues(ctx, tenantIDs, q, fieldName, uint64(limit))
 	if err != nil {
-		httpserver.Errorf(w, r, "cannot obtain stream label values: %s", err)
+		httpserver.Errorf(w, r, "cannot obtain stream field values: %s", err)
 	}
 
 	// Write results
 	w.Header().Set("Content-Type", "application/json")
-	WriteStreamLabelValuesResponse(w, values)
+	WriteValuesWithHitsJSON(w, values)
 }
 
 // ProcessStreamsRequest processes /select/logsql/streams request.
@@ -279,7 +279,7 @@ func ProcessStreamsRequest(ctx context.Context, w http.ResponseWriter, r *http.R
 
 	// Write results
 	w.Header().Set("Content-Type", "application/json")
-	WriteStreamsResponse(w, streams)
+	WriteValuesWithHitsJSON(w, streams)
 }
 
 // ProcessQueryRequest handles /select/logsql/query request.
@@ -298,11 +298,36 @@ func ProcessQueryRequest(ctx context.Context, w http.ResponseWriter, r *http.Req
 		httpserver.Errorf(w, r, "%s", err)
 		return
 	}
-	if limit > 0 {
-		q.AddPipeLimit(uint64(limit))
-	}
 
 	bw := getBufferedWriter(w)
+	defer func() {
+		bw.FlushIgnoreErrors()
+		putBufferedWriter(bw)
+	}()
+	w.Header().Set("Content-Type", "application/stream+json")
+
+	if limit > 0 {
+		if q.CanReturnLastNResults() {
+			rows, err := getLastNQueryResults(ctx, tenantIDs, q, limit)
+			if err != nil {
+				httpserver.Errorf(w, r, "%s", err)
+				return
+			}
+			bb := blockResultPool.Get()
+			b := bb.B
+			for i := range rows {
+				b = logstorage.MarshalFieldsToJSON(b[:0], rows[i].fields)
+				b = append(b, '\n')
+				bw.WriteIgnoreErrors(b)
+			}
+			bb.B = b
+			blockResultPool.Put(bb)
+			return
+		}
+
+		q.AddPipeLimit(uint64(limit))
+		q.Optimize()
+	}
 
 	writeBlock := func(_ uint, timestamps []int64, columns []logstorage.BlockColumn) {
 		if len(columns) == 0 || len(columns[0].Values) == 0 {
@@ -317,19 +342,102 @@ func ProcessQueryRequest(ctx context.Context, w http.ResponseWriter, r *http.Req
 		blockResultPool.Put(bb)
 	}
 
-	w.Header().Set("Content-Type", "application/stream+json")
-	q.Optimize()
-	err = vlstorage.RunQuery(ctx, tenantIDs, q, writeBlock)
-
-	bw.FlushIgnoreErrors()
-	putBufferedWriter(bw)
-
-	if err != nil {
+	if err := vlstorage.RunQuery(ctx, tenantIDs, q, writeBlock); err != nil {
 		httpserver.Errorf(w, r, "cannot execute query [%s]: %s", q, err)
 	}
 }
 
 var blockResultPool bytesutil.ByteBufferPool
+
+type row struct {
+	timestamp int64
+	fields    []logstorage.Field
+}
+
+func getLastNQueryResults(ctx context.Context, tenantIDs []logstorage.TenantID, q *logstorage.Query, limit int) ([]row, error) {
+	q.AddPipeLimit(uint64(limit + 1))
+	q.Optimize()
+	rows, err := getQueryResultsWithLimit(ctx, tenantIDs, q, limit+1)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) <= limit {
+		// Fast path - the requested time range contains up to limit rows.
+		sortRowsByTime(rows)
+		return rows, nil
+	}
+
+	// Slow path - search for the time range with the requested limit rows.
+	start, end := q.GetFilterTimeRange()
+	d := end/2 - start/2
+	start += d
+
+	qOrig := q
+	for {
+		q = qOrig.Clone()
+		q.AddTimeFilter(start, end)
+		rows, err := getQueryResultsWithLimit(ctx, tenantIDs, q, limit+1)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(rows) == limit || len(rows) > limit && d < 10e6 || d == 0 {
+			sortRowsByTime(rows)
+			if len(rows) > limit {
+				rows = rows[len(rows)-limit:]
+			}
+			return rows, nil
+		}
+
+		lastBit := d & 1
+		d /= 2
+		if len(rows) > limit {
+			start += d
+		} else {
+			start -= d + lastBit
+		}
+	}
+}
+
+func sortRowsByTime(rows []row) {
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i].timestamp < rows[j].timestamp
+	})
+}
+
+func getQueryResultsWithLimit(ctx context.Context, tenantIDs []logstorage.TenantID, q *logstorage.Query, limit int) ([]row, error) {
+	ctxWithCancel, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var rows []row
+	var rowsLock sync.Mutex
+	writeBlock := func(_ uint, timestamps []int64, columns []logstorage.BlockColumn) {
+		rowsLock.Lock()
+		defer rowsLock.Unlock()
+
+		for i, timestamp := range timestamps {
+			fields := make([]logstorage.Field, len(columns))
+			for j := range columns {
+				f := &fields[j]
+				f.Name = strings.Clone(columns[j].Name)
+				f.Value = strings.Clone(columns[j].Values[i])
+			}
+			rows = append(rows, row{
+				timestamp: timestamp,
+				fields:    fields,
+			})
+		}
+
+		if len(rows) >= limit {
+			cancel()
+		}
+	}
+	if err := vlstorage.RunQuery(ctxWithCancel, tenantIDs, q, writeBlock); err != nil {
+		return nil, err
+	}
+
+	return rows, nil
+}
 
 func parseCommonArgs(r *http.Request) (*logstorage.Query, []logstorage.TenantID, error) {
 	// Extract tenantID
@@ -373,10 +481,10 @@ func getTimeNsec(r *http.Request, argName string) (int64, bool, error) {
 	if s == "" {
 		return 0, false, nil
 	}
-	currentTimestamp := float64(time.Now().UnixNano()) / 1e9
-	secs, err := promutils.ParseTimeAt(s, currentTimestamp)
+	currentTimestamp := time.Now().UnixNano()
+	nsecs, err := promutils.ParseTimeAt(s, currentTimestamp)
 	if err != nil {
 		return 0, false, fmt.Errorf("cannot parse %s=%s: %w", argName, s, err)
 	}
-	return int64(secs * 1e9), true, nil
+	return nsecs, true, nil
 }
